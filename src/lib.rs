@@ -1,43 +1,48 @@
+use std::borrow::Cow;
+
+use derivative::Derivative;
 use derive_builder::Builder;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::redirect::Policy;
 use reqwest::{Client, ClientBuilder, Method, RequestBuilder, Response, Url};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use thiserror::Error;
 
 pub const API_URL: &str = "https://api.pathofexile.com";
 
-#[derive(Debug, Builder)]
-#[builder(setter(into))]
+#[derive(Derivative, Builder)]
+#[derivative(Debug)]
+#[builder(pattern = "owned")]
 /// PoE Api Config
 pub struct PoEApiConfig<'a> {
   /// Client ID
   ///
   /// **Required**
+  #[builder(setter(into))]
   client_id: Cow<'a, str>,
   /// Version
   ///
   /// **Required**
+  #[builder(setter(into))]
   version: Cow<'a, str>,
   /// Contact Email
   ///
   /// **Required**
+  #[builder(setter(into))]
   contact_email: Cow<'a, str>,
-  /// Access Token
-  ///
-  /// **Required**
-  access_token: Cow<'a, str>,
-  #[builder(default)]
-  /// User Agent Extra
-  ///
-  /// **Optional**
-  user_agent_extra: Cow<'a, str>,
-  #[builder(default)]
-  /// Custom headers
-  ///
-  /// **Optional**
-  custom_headers: HeaderMap,
+
+  #[builder(setter(custom), default = "ClientBuilder::new()")]
+  // #[derivative(Debug = "ignore")]
+  client_builder: ClientBuilder,
+}
+
+impl<'a> PoEApiConfigBuilder<'a> {
+  pub fn client_builder<F>(mut self, f: F) -> Self
+  where
+    F: FnOnce(ClientBuilder) -> ClientBuilder + 'a,
+  {
+    self.client_builder = self.client_builder.map(f);
+    self
+  }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -84,30 +89,18 @@ pub struct ProfileGuildOrTwitch {
 }
 
 impl PoEApi {
-  pub fn new(
-    PoEApiConfig {
+  pub fn new(config: PoEApiConfig<'_>) -> Result<Self> {
+    let PoEApiConfig {
       client_id,
       version,
       contact_email,
-      access_token,
-      user_agent_extra,
-      custom_headers,
-      ..
-    }: PoEApiConfig<'_>,
-  ) -> Result<Self> {
-    let mut headers = custom_headers;
-    let user_agent =
-      format!("OAuth {client_id}/{version} (contact: {contact_email}){user_agent_extra}");
-    let authorization = format!("Bearer {access_token}");
-    let mut authorization = HeaderValue::from_str(&authorization)?;
+      client_builder,
+    } = config;
 
-    authorization.set_sensitive(true);
+    let user_agent = format!("OAuth {client_id}/{version} (contact: {contact_email})");
 
-    headers.insert(AUTHORIZATION, authorization);
-
-    let client = ClientBuilder::new()
+    let client = client_builder
       .user_agent(user_agent)
-      .default_headers(headers)
       .redirect(Policy::none())
       .build()?;
 
@@ -124,9 +117,35 @@ impl PoEApi {
     self.request(Method::GET, endpoint)
   }
 
-  pub async fn get_profile(&self) -> Result<Profile> {
-    let response: Response = self.get("/profile")?.send().await?;
+  pub async fn get_profile(&self, token: &str) -> Result<Profile> {
+    self
+      .get("/profile")?
+      .bearer_auth(token)
+      .send_checked()
+      .await?
+      .json()
+      .await
+      .map_err(Into::into)
+  }
+}
 
+pub(crate) fn api_url(endpoint: &str) -> Result<Url> {
+  format!("{API_URL}{endpoint}").parse().map_err(Into::into)
+}
+
+#[async_trait::async_trait]
+pub(crate) trait RequestBuilderExt2 {
+  type Error;
+
+  async fn send_checked(self) -> Result<Response, Self::Error>;
+}
+
+#[async_trait::async_trait]
+impl RequestBuilderExt2 for RequestBuilder {
+  type Error = Error;
+
+  async fn send_checked(self) -> Result<Response, Self::Error> {
+    let response = self.send().await?;
     let status = response.status();
 
     if status.is_client_error() || status.is_server_error() {
@@ -135,27 +154,23 @@ impl PoEApi {
       return Err(Error::PoEApiError {
         error: error.error,
         error_description: error.error_description,
-      })
+      });
     }
 
-    response.json().await.map_err(Into::into)
+    Ok(response)
   }
-}
-
-pub(crate) fn api_url(endpoint: &str) -> Result<Url> {
-  format!("{API_URL}{endpoint}").parse().map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
-  use crate::PoEApiConfigBuilder;
+  use super::*;
 
   #[test]
   fn test() {
     let builder = PoEApiConfigBuilder::create_empty()
       .client_id("client")
       .version("0.0.0")
-      .access_token("token")
+      .client_builder(|builder| builder.connection_verbose(true))
       .contact_email("email@email.com")
       .build();
 
@@ -164,7 +179,6 @@ mod tests {
     if let Ok(config) = builder {
       assert_eq!(config.client_id, "client");
       assert_eq!(config.version, "0.0.0");
-      assert_eq!(config.access_token, "token");
       assert_eq!(config.contact_email, "email@email.com");
     }
   }
