@@ -1,4 +1,5 @@
-use poe_api::{PoEApi, PoEApiConfigBuilder};
+use oauth2::TokenResponse;
+use poe_api::{PoEApi, PoEApiAccountScope, PoEApiConfigBuilder};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -7,7 +8,6 @@ async fn main() -> anyhow::Result<()> {
   let client_id = dotenvy::var("CLIENT_ID")?;
   let version = dotenvy::var("VERSION")?;
   let contact_email = dotenvy::var("CONTACT_EMAIL")?;
-  let access_token = dotenvy::var("ACCESS_TOKEN")?;
 
   let config = PoEApiConfigBuilder::default()
     .client_id(client_id)
@@ -20,9 +20,20 @@ async fn main() -> anyhow::Result<()> {
 
   let api = PoEApi::new(config).unwrap();
 
-  let profile = api.get_profile(&access_token).await.unwrap();
+  let scopes = [
+    PoEApiAccountScope::Profile,
+    PoEApiAccountScope::Leagues,
+    PoEApiAccountScope::Stashes,
+    PoEApiAccountScope::Characters,
+  ];
 
-  dbg!(profile);
+  let token = api.get_token(scopes, |url| {
+    println!("{url}");
+    Ok(())
+  }).await?;
+
+  dbg!(token.access_token().secret());
+  dbg!(token);
 
   Ok(())
 }
